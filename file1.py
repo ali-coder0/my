@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-F11 Video Link Extractor - Pop-Under Killer Edition
+F11 Video Link Extractor - Pop-Under Killer + Video Sniffer
 Kaçak film/dizi sitelerinden asıl video linklerini (mp4, m3u8) çıkartır.
 Pop-under reklam tuzaklarını otomatik olarak engeller.
 """
@@ -9,6 +9,7 @@ import asyncio
 from playwright.async_api import async_playwright, Page, BrowserContext
 import argparse
 import sys
+from typing import Set, Optional
 
 
 # --- RENK TANIMLAMALARI ---
@@ -28,26 +29,41 @@ class VideoLinkExtractor:
     """Kaçak sitelerden video linklerini çıkartır ve pop-under'ları engeller."""
     
     # Video dosya uzantıları
-    VIDEO_EXTENSIONS = {'.m3u8', '.mp4', '.ts', '.mpd', '.m4s', '.webm', '.mov', '.avi', '.m4v'}
+    VIDEO_EXTENSIONS = {'.m3u8', '.mp4', '.ts', '.mpd', '.m4s', '.webm', '.mov', '.avi', '.m4v', '.mkv'}
+    
+    # Video MIME types
+    VIDEO_MIMES = {
+        'video/mp4', 'video/x-msvideo', 'application/x-mpegURL', 
+        'application/vnd.apple.mpegurl', 'video/quicktime', 'video/x-m4v',
+        'video/webm', 'video/x-matroska', 'application/dash+xml'
+    }
     
     # Video kaynağını işaret eden kritik anahtar kelimeler
     VIDEO_KEYWORDS = {
-        'vidsrc', 'master.m3u8', 'playlist.m3u8', 'stream', 
-        'video', 'source', 'manifest', 'hls', 'dash', 'media',
-        'cdn', 'content', 'playback', '.m3u8', '.mp4'
+        'vidsrc', 'master', 'playlist', 'stream', 'video', 'media',
+        'cdn', 'content', 'playback', 'sibnet', 'hemenindir'
     }
     
     def __init__(self, url: str, timeout: int = 60000):
         self.url = url
         self.timeout = timeout
-        self.video_links = set()  # Duplikasyonu önlemek için set
+        self.video_links: Set[str] = set()  # Duplikasyonu önlemek için set
         self.browser = None
         self.context = None
         self.page = None
     
-    def is_video_link(self, url: str) -> bool:
+    def is_video_link(self, url: str, content_type: Optional[str] = None) -> bool:
         """URL'nin video linki olup olmadığını kontrol et."""
+        if not url:
+            return False
+            
         url_lower = url.lower()
+        
+        # MIME type kontrolü (en güvenilir)
+        if content_type:
+            content_type_lower = content_type.lower().split(';')[0]  # charset kısmını çıkar
+            if content_type_lower in self.VIDEO_MIMES:
+                return True
         
         # Uzantı kontrolü
         for ext in self.VIDEO_EXTENSIONS:
@@ -61,13 +77,13 @@ class VideoLinkExtractor:
         
         return False
     
-    def print_video_found(self, url: str):
+    def print_video_found(self, url: str, source: str = ""):
         """Video linki bulunduğunda konsolda göster."""
-        if url not in self.video_links:  # Duplikasyonu kontrol et
+        if url not in self.video_links:
             self.video_links.add(url)
-            print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*80}")
-            print(f"🎬 ASIL VİDEO LİNKİ YAKALANDI!")
-            print(f"{'='*80}{Colors.RESET}")
+            print(f"\n{Colors.BOLD}{Colors.GREEN}{'='*90}")
+            print(f"🎬 ASIL VİDEO LİNKİ YAKALANDI! ({source})")
+            print(f"{'='*90}{Colors.RESET}")
             print(f"{Colors.GREEN}{Colors.BOLD}{url}{Colors.RESET}\n")
     
     async def handle_popup(self, context: BrowserContext):
@@ -85,10 +101,8 @@ class VideoLinkExtractor:
     async def simulate_clicks(self):
         """Sayfanın merkezine otomatik tıklamalar yap (görünmez katmanları patlatmak için)."""
         try:
-            # DOM içeriği yüklensin diye bekle
             await asyncio.sleep(2)
             
-            # Viewport boyutlarını al
             viewport = self.page.viewportsize
             if not viewport:
                 print(f"{Colors.YELLOW}⚠️ Viewport bilgisi alınamadı.{Colors.RESET}")
@@ -99,7 +113,6 @@ class VideoLinkExtractor:
             
             print(f"{Colors.CYAN}🖱️ Otomatik tıklamalar simüle ediliyor... ({int(center_x)}, {int(center_y)}){Colors.RESET}")
             
-            # 3 kez 1 saniye arayla tıkla
             for i in range(3):
                 try:
                     await self.page.mouse.click(center_x, center_y)
@@ -115,7 +128,6 @@ class VideoLinkExtractor:
         """Ana çıkartma işlemini başlat."""
         try:
             async with async_playwright() as p:
-                # Headless modu kapat, tarayıcı penceresini göster
                 self.browser = await p.chromium.launch(headless=True)
                 self.context = await self.browser.new_context()
                 self.page = await self.context.new_page()
@@ -123,20 +135,40 @@ class VideoLinkExtractor:
                 # Pop-under engelleyiciyi kur
                 await self.handle_popup(self.context)
                 
-                # Video linklerini yakala
+                # Video linklerini yakala - Response hookları
                 async def on_response(response):
                     try:
                         url = response.url
-                        if self.is_video_link(url):
-                            self.print_video_found(url)
-                    except:
+                        
+                        # Redirect URL'leri kontrol et
+                        if response.status in [301, 302, 303, 307, 308]:
+                            redirect_url = response.headers.get('location', '').strip()
+                            if redirect_url:
+                                # Protocol-relative URL'leri tamamla
+                                if redirect_url.startswith('//'):
+                                    redirect_url = 'https:' + redirect_url
+                                if self.is_video_link(redirect_url):
+                                    self.print_video_found(redirect_url, "Redirect")
+                        
+                        # Ana URL kontrolü
+                        content_type = response.headers.get('content-type', '')
+                        
+                        # Status 206 (Partial Content) video'larını yakala
+                        if response.status == 206:
+                            if self.is_video_link(url, content_type):
+                                self.print_video_found(url, "Partial Content (206)")
+                        # Normal 200 video'larını yakala
+                        elif response.status == 200:
+                            if self.is_video_link(url, content_type):
+                                self.print_video_found(url, "200 OK")
+                    
+                    except Exception as e:
                         pass
                 
                 self.page.on("response", on_response)
                 
                 try:
                     print(f"{Colors.BOLD}{Colors.BLUE}🚀 Sayfa yükleniyor: {self.url}{Colors.RESET}")
-                    # wait_until="load" daha hızlı, networkidle yerine
                     await self.page.goto(self.url, wait_until="load", timeout=self.timeout)
                     print(f"{Colors.CYAN}✓ Sayfa yüklendi, tarama başladı...{Colors.RESET}")
                     
@@ -151,7 +183,6 @@ class VideoLinkExtractor:
                     
                 except asyncio.TimeoutError:
                     print(f"{Colors.YELLOW}⚠️ Timeout! Tarama devam ediyor...{Colors.RESET}")
-                    # Timeout'tan sonra da biraz daha bekle
                     await self.simulate_clicks()
                     await asyncio.sleep(3)
                     
@@ -177,12 +208,13 @@ class VideoLinkExtractor:
     
     def show_results(self):
         """Bulduğu video linklerini göster."""
-        print(f"\n{Colors.BOLD}{Colors.MAGENTA}{'='*80}")
+        print(f"\n{Colors.BOLD}{Colors.MAGENTA}{'='*90}")
         print(f"📊 SONUÇLAR")
-        print(f"{'='*80}{Colors.RESET}")
+        print(f"{'='*90}{Colors.RESET}")
         
         if not self.video_links:
             print(f"{Colors.YELLOW}⚠️ Video linki bulunamadı.{Colors.RESET}")
+            print(f"{Colors.CYAN}💡 İpuçu: Siteye erişmek için VPN veya proxy kullanmayı deneyin.{Colors.RESET}")
         else:
             video_list = sorted(list(self.video_links))
             print(f"{Colors.GREEN}Bulunan {len(video_list)} video linki:{Colors.RESET}\n")
@@ -190,6 +222,10 @@ class VideoLinkExtractor:
                 # URL'yi 100 karakterle sınırla
                 display_link = link if len(link) <= 100 else link[:97] + "..."
                 print(f"{Colors.GREEN}{i}. {display_link}{Colors.RESET}")
+                
+                # Tam URL'yi bir kez göster
+                if len(link) > 100:
+                    print(f"   {Colors.CYAN}Tam: {link}{Colors.RESET}")
 
 
 async def main():
@@ -200,6 +236,7 @@ async def main():
 Örnek:
   python file1.py "https://cizgivedizi.com/dizi/..."
   python file1.py "https://site.com" -t 90000
+  python file1.py "site.com"
         """
     )
     parser.add_argument('url', nargs='?', help='İzlenecek URL')
