@@ -109,6 +109,32 @@ def format_file_size(size_bytes: Optional[str]) -> str:
         return "-"
 
 
+def get_table_width() -> int:
+    """Tablo genişliğini hesapla"""
+    return 7 + 3 + 6 + 3 + 10 + 3 + 12 + 3 + 25 + 3 + 100  # 175 karaktere sadeleştiriyoruz
+
+
+def print_table_header() -> None:
+    """Tablo başlığını yazdır"""
+    header = f"{'METOT':<7} | {'DURUM':<6} | {'SÜRE (ms)':<10} | {'TÜR':<12} | {'DOMAIN':<25} | {'URL':<60}"
+    print(header)
+    print("-" * len(header))
+
+
+def print_table_row(
+    method_colored: str,
+    status_colored: str,
+    duration_ms: int,
+    type_colored: str,
+    domain: str,
+    display_url: str,
+    error_marker: str = ""
+) -> None:
+    """Tablo satırını yazdır"""
+    print(f"{method_colored:<7} | {status_colored:<6} | {duration_ms:<10} | "
+          f"{type_colored:<12} | {domain:<25} | {display_url:<60}{error_marker}")
+
+
 def network_izle(
     url: str,
     output_csv: Optional[str] = None,
@@ -137,8 +163,7 @@ def network_izle(
     
     print(f"{Colors.BOLD}📡 Ağ İzleme Başlatılıyor...{Colors.RESET}")
     print(f"Hedef: {url}")
-    print(f"{'METOT':<7} | {'DURUM':<6} | {'SÜRE (ms)':<10} | {'TÜR':<12} | {'DOMAIN':<25} | {'URL (Max 100 char)'}")
-    print("-" * 110)
+    print_table_header()
 
     try:
         with sync_playwright() as p:
@@ -195,11 +220,18 @@ def network_izle(
                     status_colored = renkle_durum(status)
                     method_colored = renkle_metot(method)
                     type_colored = renkle_tip(resource_type)
-                    error_marker = " ⚠️ " if is_error else ""
-                    display_url = format_display_url(url_full)
+                    error_marker = " ⚠️" if is_error else ""
+                    display_url = format_display_url(url_full, max_length=60)
                     
-                    print(f"{method_colored:<7} | {status_colored:<6} | {duration_ms:<10} | "
-                          f"{type_colored:<12} | {domain:<25} | {display_url}{error_marker}")
+                    print_table_row(
+                        method_colored,
+                        status_colored,
+                        duration_ms,
+                        type_colored,
+                        domain,
+                        display_url,
+                        error_marker
+                    )
 
             def on_websocket(ws) -> None:
                 """WebSocket hook"""
@@ -221,9 +253,15 @@ def network_izle(
                 }
                 results.append(result)
                 if verbose:
-                    display_ws = format_display_url(ws_url)
-                    print(f"{renkle_metot('WS'):<7} | {renkle_durum(101):<6} | {'-':<10} | "
-                          f"{renkle_tip('websocket'):<12} | {domain:<25} | {display_ws}")
+                    display_ws = format_display_url(ws_url, max_length=60)
+                    print_table_row(
+                        renkle_metot('WS'),
+                        renkle_durum(101),
+                        0,
+                        renkle_tip('websocket'),
+                        domain,
+                        display_ws
+                    )
 
             page.on("request", on_request)
             page.on("response", on_response)
